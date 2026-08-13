@@ -1,0 +1,50 @@
+name: Refresh census
+
+# The catalogue behind this dataset is rebuilt nightly at 05:00 CET. This runs
+# after that, so the committed files match what the live API serves and the
+# repository does not quietly go stale while still advertising a daily refresh.
+on:
+  schedule:
+    - cron: "30 4 * * *" # 04:30 UTC, after the 05:00 CET rebuild
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download current census
+        run: |
+          set -euo pipefail
+          curl -sfL --max-time 120 https://claudewave.com/api/dataset/repos.csv  -o data/repos.csv.new
+          curl -sfL --max-time 120 https://claudewave.com/api/dataset/trust.json -o data/trust.json.new
+
+          # Refuse a truncated download rather than overwrite a good dataset
+          # with a broken one. A partial file is worse than yesterday's complete
+          # file, and a silent truncation would be invisible to anyone using it.
+          rows=$(wc -l < data/repos.csv.new)
+          if [ "$rows" -lt 1000 ]; then
+            echo "repos.csv only has $rows rows, refusing to overwrite"
+            exit 1
+          fi
+          python3 -c "import json,sys; d=json.load(open('data/trust.json.new')); sys.exit(0 if d.get('count',0) > 1000 else 1)"
+
+          mv data/repos.csv.new  data/repos.csv
+          mv data/trust.json.new data/trust.json
+
+      - name: Read census date
+        id: stamp
+        run: |
+          echo "date=$(python3 -c "import json;print(json.load(open('data/trust.json'))['generatedAt'][:10])")" >> "$GITHUB_OUTPUT"
+
+      - name: Commit if changed
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "data: census refresh ${{ steps.stamp.outputs.date }}"
+          commit_user_name: claudewave-bot
+          commit_user_email: hello@claudewave.com
+          file_pattern: data/
